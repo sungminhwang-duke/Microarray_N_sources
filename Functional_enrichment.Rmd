@@ -1,0 +1,226 @@
+---
+title: "Functional enrichment"
+output: html_notebook
+---
+##libraries
+```{r}
+library(tidyverse)
+library(reutils)
+
+source("https://bioconductor.org/biocLite.R")
+BiocManager::install("rtracklayer")
+
+```
+
+##Getting fasta sequences from gene names/locus tags
+```{r}
+#read in your .gff file and list of significant genes here
+my.genes <- read.csv("#Input .csv file format")
+my.gff <- as.data.frame(rtracklayer::import("#Input .gff file format of genome"))
+
+#this function converts genomes annotation files (.gff) from NCBI to a readable table
+gff.parse <- function(x) {
+  ids <- list()
+  x %>% filter(type == "gene" | type == "CDS") -> x
+  
+  if ("old_locus_tag" %in% colnames(x)) {
+    for (i in 1:(nrow(x)-1)) {
+      if (all(x[i,2:4] == x[i+1,2:4])) {
+      vec <- data.frame("acc"= x[["protein_id"]][(i+1)], 
+                        "locus_tag" = x[["locus_tag"]][i], 
+                        "old_locus_tag" = x[["old_locus_tag"]][i], 
+                        "length_nt"= x[["width"]][i], 
+                        "start"= x[["start"]][i], 
+                        "end"= x[["end"]][i],
+                        "type"= x[["gene_biotype"]][i],
+                        "annotation"= x[["product"]][(i+1)])
+      ids[[i]] <- vec
+      }}} 
+  else if ("gene" %in% colnames(x)) {
+    for (i in 1:(nrow(x)-1)) {
+      if (all(x[i,2:4] == x[i+1,2:4])) {
+      vec <- data.frame("acc"= x[["protein_id"]][(i+1)], 
+                        "locus_tag" = x[["locus_tag"]][i], 
+                        "gene_name" = x[["gene"]][i], 
+                        "length_nt"= x[["width"]][i], 
+                        "start"= x[["start"]][i], 
+                        "end"= x[["end"]][i],
+                        "type"= x[["gene_biotype"]][i],
+                        "annotation"= x[["product"]][(i+1)])
+      ids[[i]] <- vec
+      }}}
+  
+  df <- bind_rows(ids)
+  if (length(na.omit(unique(x[["protein_id"]]))) == length(na.omit(unique(df[["acc"]])))) {
+    print("all protein ids accounted for")
+  }
+  return(df)
+}
+
+#this function gets sequences based on your acc list
+getseqs <- function(x, filename) {
+  #x must be a vector of acc or gi numbers.
+  require(reutils)
+  path <- file.path(getwd(), filename)
+  #uid1 <- esearch(x, "protein", rettype = "uilist", usehistory = T)
+  efetch(x, "protein", "fasta", "text", outfile = filename)
+  print(paste("sequences can be found at ", path))
+}
+
+#execute function (it takes ~ 5 min)
+gff.table <- gff.parse(my.gff)
+```
+
+```{r}
+#convert from locus tags to GI accession numbers
+my.accs.old <- unique(gff.table[gff.table$old_locus_tag %in% my.genes$Gene,]$acc)
+my.old.locus <- gff.table[gff.table$old_locus_tag %in% my.genes$Gene,]$old_locus_tag
+
+#check length
+length(my.genes$Gene) - length(my.accs.old) 
+length(my.old.locus) - length(my.accs.old)
+
+#get proteins with missing accs
+`%ni%` <- Negate(`%in%`)
+my.genes$Gene[my.genes$Gene %ni% gff.table$old_locus_tag]
+
+#identify what genes in my.accs.old
+print(my.accs.old)
+
+#get sequences
+setwd("Assign where the sequence file located")
+getseqs(my.accs.old, "#Assign sequence file")
+
+```
+
+##Parsing the eggNOG output file
+```{r}
+my.eggNOG.5per <- read_csv("#Input .csv file format")
+
+#this function parses the eggNOG output files for later enrichment analysis
+getNOG <- function(x, colname = "eggNOGs", sep = " ", factors = FALSE) {
+  lis <- list()
+  for (i in 1:length(x[[colname]])) {
+    vec <- c(capture.output(cat(unlist(str_extract_all(x[[colname]][i], "[a-zA-Z0-9]*@NOG")), sep = sep)))
+    lis[[i]] <- vec
+    column.names <- "NOGs"
+    } 
+  df <- as.data.frame(do.call(rbind, lis), stringsAsFactors = FALSE)
+  colnames(df) <- column.names
+  df <- cbind("query" = x[["query"]], df, "COG_category" = x[["COG Cat."]], "HMM_description" = x[["eggNOG HMM Desc."]])
+  return(df)
+}
+
+(my.NOGs <- getNOG(my.eggNOG.5per))
+```
+
+##Functional enrichment
+```{r}
+my.genome.NOG <- read_csv("#Input .csv file") 
+
+#this function performs a hypergeomentric test to see if any functions are significantly enrichmed relative to the genome (or other list provided)
+nogtest <- function(namelist,nogfile,pvalue, cutoff = 1) {
+  #namelist is a vector of protein on gene names you wnat to test for enrichment
+  #nogfile is the genome-wide GETNOG output
+  #p-value is significance threshold desired
+  #cutoff preset prevents functional categories with less than the designated number of genes/proteins being displayed 
+  
+  nogs <- nogfile[nogfile[["query"]] %in% namelist,]
+  clust= table(nogs[["COG_category"]])
+  resm <- matrix(0,length(clust),3) #create 0 matrix
+  res <-data.frame(resm)  #make 0 df
+  rownames(res) <- names(clust)
+  colnames(res) <- c("probability", "expect","count")
+  all=table(nogfile[["COG_category"]][nogfile[["COG_category"]] %in% nogs[["COG_category"]]])
+  
+  for (i in 1:length(clust)){   #calc expected frequencies and pval by hypergeo and append to DF
+    
+    res[i,1] <- phyper(clust[i], all[i], sum(all)-all[i], nrow(nogs),lower.tail=F)
+    res[i,2] <- all[i]*(nrow(nogs)/sum(all))
+    res[i,3] <- clust[i]
+  }
+  fin <- subset(res, probability <= pvalue & count >= cutoff)
+  return(fin)
+}
+
+#this function returns the list of proteins that are in a specific category
+nogset <- function(namelist,nogfile, cog.category) {
+  subset(nogfile, is.element(nogfile$query, namelist) & is.element(nogfile$COG_category, cog.category)==TRUE)
+}
+
+#get enriched functions
+my.sig.cat <- nogtest(my.eggNOG.5per$query, my.genome.NOG, 0.05)
+my.sig.cat
+
+#get proteins with specific function, where "X" is the single letter functional code
+my.sig.proteins <- nogset(my.eggNOG.5per$query, my.genome.NOG, "E")
+
+#convert those proteins from acc back to locus_tags
+my.sig.proteins$gene.name <- gff.table[gff.table$acc %in% my.sig.proteins$query,]$old_locus_tag
+my.sig.proteins$p.value <- rep(my.sig.cat$probability, nrow(my.sig.proteins))
+head(my.sig.proteins)
+
+#write out files
+write_csv(my.sig.proteins, "#Save as .csv")
+```
+
+
+## arCOG
+```{r}
+#arCOG functional enrichment -- Dulmage et al., "Growth phase specific modulation of cell morphology and gene expression by an archaeal histone protein"
+#It can be found here, https://github.com/amyschmid/histone_arCOG/blob/master/arCOG_12192014.R
+
+#arCOG 2015 edition ftp://ftp.ncbi.nih.gov/pub/wolf/COGs/arCOG
+
+#Load arCOG annotation file. 
+load('~/NRC-1_arCOG_2012_final.Rdata')
+
+ls() 
+
+#Check to be sure an object called 'cogs' is listed this is your cog table
+
+#Read in gene list file 
+
+namelist = read.delim(file='~/namelist.txt', header=T, sep='\t')
+
+#Be sure this list contains only the unique identifiers of your genes that matches those in the cog table (e.g. for H. salinarum, use VNG number identifiers)
+
+#Calculate statistical information about the cogs represented in the list of genes using the function below.
+
+# Cogtest: three inputs to this function: 
+# 1) list of gene names from the cluster (namelist)
+# 2) COG file
+# 3) p-value cutoff.  
+
+cogtest2=function(namelist,cogfile,pvalue) {
+	cogs= subset(cogfile, is.element(cogfile$GeneName, namelist)==TRUE)
+	clust= summary(cogs$funclass_name)
+	resm <- matrix(0,31,3) 
+	res <-data.frame(resm)
+	rownames(res) <- names(clust)
+	colnames(res) <- c("probability", "expect","count")
+	all=summary(cogfile$funclass_name)
+	totaln=sum(all)
+	
+		for (i in 1:length(clust)){
+			
+			res[i,1] <- phyper(clust[i], all[i], totaln-all[i], length(namelist),lower.tail=F)
+			res[i,2] <- all[i]*(length(namelist)/totaln)
+			res[i,3] <- clust[i]
+				}
+	subset(res,probability<=pvalue&count!=0)
+		}
+		
+#Use the following function to look at the genes in your cluster associated with a particular COG.
+
+#Note: the COGcategory name must be entered in quotes and add a space to the end of the category name of interest, e.g. 'transport '
+
+cogset= function(namelist,cogfile, COGcategory) {
+	subset(cogfile, is.element(cogfile$GeneName, namelist)&is.element(cogfile$funclass_name, COGcategory)==TRUE)
+}
+
+#Save results using write.table(), e.g. (x, file='clust296.txt',sep='\t')
+
+
+
+```
