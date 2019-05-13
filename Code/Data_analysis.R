@@ -5,7 +5,7 @@ library(dplyr)
 library(tidyr)
 
 # Input the normalized data
-microarray_data <- read.csv("#Input .csv format")
+microarray_data <- read.csv("H26_all_genes_normalized.csv")
 
 # Identify the correlation coefficient and the significance level(or p-value) from the two different N-sources (alanine vs ammonium chloride) with each biological replicates
 
@@ -62,11 +62,9 @@ with(subset(H26_DE, qvalue<0.05 & abs(log2FoldChange)>1), points(log2FoldChange,
 print(subset(H26_DE, qvalue<0.05 & abs(log2FoldChange)>1))
 arrangement <- print(subset(H26_DE, qvalue<0.05 & abs(log2FoldChange)>1))
 print_arrangement <- print(arrangement[,2])
-write.csv(arrangement, "#Assign where and what name of result .csv format")
 
 # Label the significant genes from the calibrate plot
 library(calibrate)
-
 with(subset(H26_DE, qvalue<0.05 & abs(log2FoldChange)>1), textxy(log2FoldChange, -log10(pvalue), labs=Gene, cex=.4))
 
 # Cluster the significant genes and visualized by Heatmap
